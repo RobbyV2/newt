@@ -11,7 +11,6 @@ import (
 	"github.com/fosrl/newt/authdaemon"
 	"github.com/fosrl/newt/browsergateway"
 	wgclients "github.com/fosrl/newt/clients"
-	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/nativessh"
@@ -68,9 +67,6 @@ type Newt struct {
 
 	// Auth daemon (Linux only)
 	authDaemonServer *authdaemon.Server
-
-	// Docker monitoring
-	dockerEventMonitor *docker.EventMonitor
 
 	// Current tunnel data
 	wgData WgData
@@ -210,33 +206,6 @@ func (n *Newt) Start(ctx context.Context) {
 	}
 	defer n.client.Close()
 
-	if n.config.DockerSocket != "" {
-		logger.Debug("Initializing Docker event monitoring")
-		var err error
-		n.dockerEventMonitor, err = docker.NewEventMonitor(
-			n.config.DockerSocket,
-			n.config.DockerEnforceNetworkValidation,
-			func(containers []docker.Container) {
-				logger.Debug("Docker event detected, sending updated container list (%d containers)", len(containers))
-				if err := n.client.SendMessage("newt/socket/containers", map[string]interface{}{
-					"containers": containers,
-				}); err != nil {
-					logger.Error("Failed to send updated container list after Docker event: %v", err)
-				} else {
-					logger.Debug("Updated container list sent successfully")
-				}
-			})
-		if err != nil {
-			logger.Error("Failed to create Docker event monitor: %v", err)
-		} else {
-			if err := n.dockerEventMonitor.Start(); err != nil {
-				logger.Error("Failed to start Docker event monitoring: %v", err)
-			} else {
-				logger.Debug("Docker event monitoring started successfully")
-			}
-		}
-	}
-
 	if n.config.BlueprintFile != "" {
 		go watchBlueprintFile(ctx, n.config.BlueprintFile, func() error {
 			return sendBlueprint(n.client, n.config.BlueprintFile)
@@ -246,10 +215,6 @@ func (n *Newt) Start(ctx context.Context) {
 	<-ctx.Done()
 
 	n.closeClients()
-
-	if n.dockerEventMonitor != nil {
-		n.dockerEventMonitor.Stop()
-	}
 
 	if n.healthMonitor != nil {
 		n.healthMonitor.Stop()

@@ -11,7 +11,6 @@ import (
 
 	"github.com/fosrl/newt/browsergateway"
 	newtDevice "github.com/fosrl/newt/device"
-	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/proxy"
@@ -25,10 +24,6 @@ import (
 
 func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	logger.Debug("Received registration message")
-	regResult := "success"
-	defer func() {
-		telemetry.IncSiteRegistration(ctx, regResult)
-	}()
 
 	var chainData struct {
 		ChainId string `json:"chainId"`
@@ -59,13 +54,11 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	jsonData, err := json.Marshal(msg.Data)
 	if err != nil {
 		logger.Info(fmtErrMarshaling, err)
-		regResult = "failure"
 		return
 	}
 
 	if err := json.Unmarshal(jsonData, &n.wgData); err != nil {
 		logger.Info("Error unmarshaling target data: %v", err)
-		regResult = "failure"
 		return
 	}
 
@@ -77,14 +70,12 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 			mainIfName, err = network.FindUnusedUTUN()
 			if err != nil {
 				logger.Error("Failed to find unused utun for main tunnel: %v", err)
-				regResult = "failure"
 				return
 			}
 		}
 		n.tun, err = wtun.CreateTUN(mainIfName, n.config.MTU)
 		if err != nil {
 			logger.Error("Failed to create native main TUN device: %v", err)
-			regResult = "failure"
 			return
 		}
 		if realName, nameErr := n.tun.Name(); nameErr == nil {
@@ -99,7 +90,6 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 			n.config.MTU)
 		if err != nil {
 			logger.Error("Failed to create TUN device: %v", err)
-			regResult = "failure"
 		}
 	}
 
@@ -113,7 +103,6 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	host, _, err := net.SplitHostPort(n.wgData.Endpoint)
 	if err != nil {
 		logger.Error("Failed to split endpoint: %v", err)
-		regResult = "failure"
 		return
 	}
 
@@ -122,7 +111,6 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	resolvedEndpoint, err := util.ResolveDomain(n.wgData.Endpoint)
 	if err != nil {
 		logger.Error("Failed to resolve endpoint: %v", err)
-		regResult = "failure"
 		return
 	}
 
@@ -141,12 +129,10 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 
 	if err = n.dev.IpcSet(wgConfig); err != nil {
 		logger.Error("Failed to configure WireGuard device: %v", err)
-		regResult = "failure"
 	}
 
 	if err = n.dev.Up(); err != nil {
 		logger.Error("Failed to bring up WireGuard device: %v", err)
-		regResult = "failure"
 	}
 
 	if n.config.UseNativeMainInterface {
@@ -208,13 +194,9 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	}
 
 	logger.Debug("Testing initial connection with reliable ping...")
-	lat, err := reliablePing(pinger, n.wgData.ServerIP, n.config.PingTimeout, 5)
-	if err == nil && n.wgData.PublicKey != "" {
-		telemetry.ObserveTunnelLatency(ctx, n.wgData.PublicKey, "wireguard", lat.Seconds())
-	}
+	_, err = reliablePing(pinger, n.wgData.ServerIP, n.config.PingTimeout, 5)
 	if err != nil {
 		logger.Warn("Initial reliable ping failed, but continuing: %v", err)
-		regResult = "failure"
 	} else {
 		logger.Debug("Initial connection test successful")
 	}
@@ -223,7 +205,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 
 	if !n.connected {
 		logger.Debug("Starting ping check")
-		n.pingStopChan = n.startPingCheck(pinger, n.wgData.ServerIP, n.wgData.PublicKey)
+		n.pingStopChan = n.startPingCheck(pinger, n.wgData.ServerIP)
 	}
 
 	if n.config.UseNativeMainInterface {
@@ -231,9 +213,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	} else {
 		n.pm = proxy.NewProxyManager(n.tnet)
 	}
-	n.pm.SetAsyncBytes(n.config.MetricsAsyncBytes)
 	n.pm.SetUDPIdleTimeout(n.config.UDPProxyIdleTimeout)
-	n.pm.SetTunnelID(n.wgData.PublicKey)
 	n.pm.SetBlocked(n.connectionBlocked.Load())
 	n.currentPM.Store(n.pm)
 

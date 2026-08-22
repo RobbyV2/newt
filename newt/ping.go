@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -215,7 +214,7 @@ func (n *Newt) pingWithRetry(fn pingFunc, dst string, timeout time.Duration) (st
 	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
 }
 
-func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struct{} {
+func (n *Newt) startPingCheck(fn pingFunc, serverIP string) chan struct{} {
 	maxInterval := 6 * time.Second
 	currentInterval := n.config.PingInterval
 	consecutiveFailures := 0
@@ -271,9 +270,6 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 					if shouldFireRecovery(consecutiveFailures, failureThreshold, connectionLost) {
 						connectionLost = true
 						logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
-						if tunnelID != "" {
-							telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
-						}
 						pingChainId := generateChainId()
 						n.pendingPingChainId = pingChainId
 						n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
@@ -303,9 +299,6 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 					}
 				} else {
 					recentLatencies = append(recentLatencies, latency)
-					if tunnelID != "" {
-						telemetry.ObserveTunnelLatency(context.Background(), tunnelID, "wireguard", latency.Seconds())
-					}
 					if len(recentLatencies) > 10 {
 						recentLatencies = recentLatencies[1:]
 					}

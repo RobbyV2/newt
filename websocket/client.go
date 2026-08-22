@@ -23,9 +23,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"context"
-
-	"github.com/fosrl/newt/internal/telemetry"
-	"go.opentelemetry.io/otel"
 )
 
 // writeDeadline bounds how long a websocket write may block before it is
@@ -38,29 +35,27 @@ import (
 const writeDeadline = 10 * time.Second
 
 type Client struct {
-	conn              *websocket.Conn
-	config            *Config
-	baseURL           string
-	handlers          map[string]MessageHandler
-	done              chan struct{}
-	handlersMux       sync.RWMutex
-	reconnectInterval time.Duration
-	isConnected       bool
-	reconnectMux      sync.RWMutex
-	pingInterval      time.Duration
-	pongWait          time.Duration // read deadline window; if no pong/message arrives within it, the connection is considered dead
-	onConnect         func() error
-	onTokenUpdate     func(token string)
-	writeMux          sync.Mutex
-	clientType        string // Type of client (e.g., "newt", "olm")
-	configFilePath    string // Optional override for the config file path
-	tlsConfig         TLSConfig
-	metricsCtxMu      sync.RWMutex
-	metricsCtx        context.Context
-	configNeedsSave   bool // Flag to track if config needs to be saved
-	serverVersion     string
-	configVersion     int64 // Latest config version received from server
-	configVersionMux  sync.RWMutex
+	conn                *websocket.Conn
+	config              *Config
+	baseURL             string
+	handlers            map[string]MessageHandler
+	done                chan struct{}
+	handlersMux         sync.RWMutex
+	reconnectInterval   time.Duration
+	isConnected         bool
+	reconnectMux        sync.RWMutex
+	pingInterval        time.Duration
+	pongWait            time.Duration // read deadline window; if no pong/message arrives within it, the connection is considered dead
+	onConnect           func() error
+	onTokenUpdate       func(token string)
+	writeMux            sync.Mutex
+	clientType          string // Type of client (e.g., "newt", "olm")
+	configFilePath      string // Optional override for the config file path
+	tlsConfig           TLSConfig
+	configNeedsSave     bool // Flag to track if config needs to be saved
+	serverVersion       string
+	configVersion       int64 // Latest config version received from server
+	configVersionMux    sync.RWMutex
 	processingMessage   bool           // Flag to track if a message is currently being processed
 	processingMux       sync.RWMutex   // Protects processingMessage
 	processingWg        sync.WaitGroup // WaitGroup to wait for message processing to complete
@@ -123,26 +118,6 @@ func (c *Client) WasJustProvisioned() bool {
 	v := c.justProvisioned
 	c.justProvisioned = false
 	return v
-}
-
-func (c *Client) metricsContext() context.Context {
-	c.metricsCtxMu.RLock()
-	defer c.metricsCtxMu.RUnlock()
-	if c.metricsCtx != nil {
-		return c.metricsCtx
-	}
-	return context.Background()
-}
-
-func (c *Client) setMetricsContext(ctx context.Context) {
-	c.metricsCtxMu.Lock()
-	c.metricsCtx = ctx
-	c.metricsCtxMu.Unlock()
-}
-
-// MetricsContext exposes the context used for telemetry emission when a connection is active.
-func (c *Client) MetricsContext() context.Context {
-	return c.metricsContext()
 }
 
 // NewClient creates a new websocket client
@@ -235,7 +210,6 @@ func (c *Client) Close() error {
 
 	// Set connection status to false
 	c.setConnected(false)
-	telemetry.SetWSConnectionState(false)
 
 	// Close the WebSocket connection gracefully
 	if c.conn != nil {
@@ -272,7 +246,6 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 	if err := c.conn.WriteJSON(msg); err != nil {
 		return err
 	}
-	telemetry.IncWSMessage(c.metricsContext(), "out", "text")
 	return nil
 }
 
@@ -295,7 +268,6 @@ func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
 	if err := c.conn.WriteJSON(msg); err != nil {
 		return err
 	}
-	telemetry.IncWSMessage(c.metricsContext(), "out", "text")
 	return nil
 }
 
@@ -426,8 +398,6 @@ func (c *Client) getToken() (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		telemetry.IncConnAttempt(ctx, "auth", "failure")
-		telemetry.IncConnError(ctx, "auth", classifyConnError(err))
 		return "", fmt.Errorf("failed to request new token: %w", err)
 	}
 	defer resp.Body.Close()
@@ -437,16 +407,6 @@ func (c *Client) getToken() (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("Failed to get token with status code: %d", resp.StatusCode)
-		telemetry.IncConnAttempt(ctx, "auth", "failure")
-		etype := "io_error"
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			etype = "auth_failed"
-		}
-		telemetry.IncConnError(ctx, "auth", etype)
-		// Reconnect reason mapping for auth failures
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			telemetry.IncReconnect(ctx, c.config.ID, "client", telemetry.ReasonAuthError)
-		}
 		return "", fmt.Errorf("failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
@@ -470,7 +430,6 @@ func (c *Client) getToken() (string, error) {
 	c.serverVersion = tokenResp.Data.ServerVersion
 
 	logger.Debug("Received token: %s", tokenResp.Data.Token)
-	telemetry.IncConnAttempt(ctx, "auth", "success")
 
 	return tokenResp.Data.Token, nil
 }
@@ -559,8 +518,6 @@ func (c *Client) establishConnection() error {
 	// Get token for authentication
 	token, err := c.getToken()
 	if err != nil {
-		telemetry.IncConnAttempt(ctx, "websocket", "failure")
-		telemetry.IncConnError(ctx, "websocket", classifyConnError(err))
 		return fmt.Errorf("failed to get token: %w", err)
 	}
 
@@ -593,12 +550,7 @@ func (c *Client) establishConnection() error {
 	q.Set("clientType", c.clientType)
 	u.RawQuery = q.Encode()
 
-	// Connect to WebSocket (optional span)
-	tr := otel.Tracer("newt")
-	ctx, span := tr.Start(ctx, "ws.connect")
-	defer span.End()
-
-	start := time.Now()
+	// Connect to WebSocket
 	dialer := websocket.DefaultDialer
 
 	// Use new TLS configuration method
@@ -621,31 +573,12 @@ func (c *Client) establishConnection() error {
 	}
 
 	conn, _, err := dialer.DialContext(ctx, u.String(), nil)
-	lat := time.Since(start).Seconds()
 	if err != nil {
-		telemetry.IncConnAttempt(ctx, "websocket", "failure")
-		etype := classifyConnError(err)
-		telemetry.IncConnError(ctx, "websocket", etype)
-		telemetry.ObserveWSConnectLatency(ctx, lat, "failure", etype)
-		// Map handshake-related errors to reconnect reasons where appropriate
-		if etype == "tls_handshake" {
-			telemetry.IncReconnect(ctx, c.config.ID, "client", telemetry.ReasonHandshakeError)
-		} else if etype == "dial_timeout" {
-			telemetry.IncReconnect(ctx, c.config.ID, "client", telemetry.ReasonTimeout)
-		} else {
-			telemetry.IncReconnect(ctx, c.config.ID, "client", telemetry.ReasonError)
-		}
-		telemetry.IncWSReconnect(ctx, etype)
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
-	telemetry.IncConnAttempt(ctx, "websocket", "success")
-	telemetry.ObserveWSConnectLatency(ctx, lat, "success", "")
 	c.conn = conn
 	c.setConnected(true)
-	telemetry.SetWSConnectionState(true)
-	c.setMetricsContext(ctx)
-	sessionStart := time.Now()
 
 	// Per-connection lifecycle channel. The read pump closes it when this
 	// connection ends so the matching ping monitor stops (avoids leaking a
@@ -660,14 +593,13 @@ func (c *Client) establishConnection() error {
 	_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	c.conn.SetPongHandler(func(appData string) error {
 		_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
-		telemetry.IncWSMessage(c.metricsContext(), "in", "pong")
 		return nil
 	})
 
 	// Start the ping monitor
 	go c.pingMonitor(connClosed)
 	// Start the read pump with disconnect detection
-	go c.readPumpWithDisconnectDetection(sessionStart, connClosed)
+	go c.readPumpWithDisconnectDetection(connClosed)
 
 	if c.onConnect != nil {
 		err := c.saveConfig()
@@ -780,7 +712,6 @@ func (c *Client) sendPing() {
 		err = c.conn.WriteJSON(pingMsg)
 	}
 	if err == nil {
-		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
 		// Protocol-level ping: a standards-compliant server replies with a PONG,
 		// which refreshes the read deadline. This is what lets us notice a
 		// half-open connection where writes still succeed (buffered) but the
@@ -797,8 +728,6 @@ func (c *Client) sendPing() {
 			return
 		default:
 			logger.Error("Ping failed: %v", err)
-			telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
-			telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
 			// Close the connection and let the read pump trigger a single
 			// reconnect (avoids racing two reconnects from here and the pump).
 			c.writeMux.Lock()
@@ -833,9 +762,7 @@ func (c *Client) pingMonitor(connClosed <-chan struct{}) {
 }
 
 // readPumpWithDisconnectDetection reads messages and triggers reconnect on error
-func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed chan struct{}) {
-	ctx := c.metricsContext()
-	disconnectReason := "shutdown"
+func (c *Client) readPumpWithDisconnectDetection(connClosed chan struct{}) {
 	disconnectResult := "success"
 
 	defer func() {
@@ -844,17 +771,12 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 		if c.conn != nil {
 			c.conn.Close()
 		}
-		if !started.IsZero() {
-			telemetry.ObserveWSSessionDuration(ctx, time.Since(started).Seconds(), disconnectResult)
-		}
-		telemetry.IncWSDisconnect(ctx, disconnectReason, disconnectResult)
 		// Only attempt reconnect if we're not shutting down
 		select {
 		case <-c.done:
 			// Shutting down, don't reconnect
 			return
 		default:
-			telemetry.IncWSReconnect(ctx, disconnectReason)
 			c.reconnect()
 		}
 	}()
@@ -862,7 +784,6 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 	for {
 		select {
 		case <-c.done:
-			disconnectReason = "shutdown"
 			disconnectResult = "success"
 			return
 		default:
@@ -873,9 +794,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 				// "newt/ping" with a message rather than a protocol pong).
 				_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 				if msgType == websocket.BinaryMessage {
-					telemetry.IncWSMessage(c.metricsContext(), "in", "binary")
 				} else {
-					telemetry.IncWSMessage(c.metricsContext(), "in", "text")
 				}
 			}
 			if err != nil {
@@ -884,12 +803,11 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 				case <-c.done:
 					// Expected during shutdown, don't log as error
 					logger.Debug("WebSocket connection closed during shutdown")
-					disconnectReason = "shutdown"
 					disconnectResult = "success"
 					return
 				default:
 					// Unexpected error during normal operation
-					disconnectResult, disconnectReason = classifyWSDisconnect(err)
+					disconnectResult, _ = classifyWSDisconnect(err)
 					if disconnectResult == "error" {
 						if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
 							logger.Error("WebSocket read error: %v", err)
@@ -950,7 +868,6 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 
 func (c *Client) reconnect() {
 	c.setConnected(false)
-	telemetry.SetWSConnectionState(false)
 	c.writeMux.Lock()
 	if c.conn != nil {
 		c.conn.Close()

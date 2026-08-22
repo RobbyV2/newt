@@ -44,10 +44,6 @@ type Config struct {
 	ProvisioningBlueprintFile string
 	UpdownScript              string
 
-	// Docker
-	DockerSocket                   string
-	DockerEnforceNetworkValidation bool
-
 	// Auth daemon
 	AuthDaemonKey                    string
 	AuthDaemonPrincipalsFile         string
@@ -59,14 +55,6 @@ type Config struct {
 	TLSClientKey  string
 	TLSClientCAs  []string
 	TLSPrivateKey string
-
-	// Metrics/observability
-	MetricsEnabled    bool
-	OTLPEnabled       bool
-	AdminAddr         string
-	Region            string
-	MetricsAsyncBytes bool
-	PprofEnabled      bool
 
 	// Callbacks
 	OnRestart func() error

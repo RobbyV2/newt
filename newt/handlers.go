@@ -15,11 +15,8 @@ import (
 
 	"github.com/fosrl/newt/authdaemon"
 	"github.com/fosrl/newt/browsergateway"
-	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/exitnode"
 	"github.com/fosrl/newt/healthcheck"
-	"github.com/fosrl/newt/internal/state"
-	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/util"
@@ -43,16 +40,8 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 
 	n.client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
-		if n.wgData.PublicKey != "" {
-			telemetry.IncReconnect(ctx, n.wgData.PublicKey, "server", telemetry.ReasonServerRequest)
-		}
 
 		n.closeWgTunnel()
-
-		if n.pm != nil {
-			n.pm.ClearTunnelID()
-			state.Global().ClearTunnel(n.wgData.PublicKey)
-		}
 
 		n.connected = false
 
@@ -89,9 +78,6 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 
 	n.client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
-		if n.wgData.PublicKey != "" {
-			telemetry.IncReconnect(ctx, n.wgData.PublicKey, "server", telemetry.ReasonServerRequest)
-		}
 
 		n.closeWgTunnel()
 		n.closeClients()
@@ -336,55 +322,6 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			}
 		}
 		logger.Info("Removed %d remote exit node subnets", len(data.Subnets))
-	})
-
-	n.client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
-		logger.Debug("Received Docker socket check request")
-
-		if n.config.DockerSocket == "" {
-			logger.Debug("Docker socket path is not set")
-			if err := n.client.SendMessage("newt/socket/status", map[string]interface{}{
-				"available":  false,
-				"socketPath": n.config.DockerSocket,
-			}); err != nil {
-				logger.Error("Failed to send Docker socket check response: %v", err)
-			}
-			return
-		}
-
-		isAvailable := docker.CheckSocket(n.config.DockerSocket)
-
-		if err := n.client.SendMessage("newt/socket/status", map[string]interface{}{
-			"available":  isAvailable,
-			"socketPath": n.config.DockerSocket,
-		}); err != nil {
-			logger.Error("Failed to send Docker socket check response: %v", err)
-		} else {
-			logger.Debug("Docker socket check response sent: available=%t", isAvailable)
-		}
-	})
-
-	n.client.RegisterHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
-		logger.Debug("Received Docker container fetch request")
-
-		if n.config.DockerSocket == "" {
-			logger.Debug("Docker socket path is not set")
-			return
-		}
-
-		containers, err := docker.ListContainers(n.config.DockerSocket, n.config.DockerEnforceNetworkValidation)
-		if err != nil {
-			logger.Error("Failed to list Docker containers: %v", err)
-			return
-		}
-
-		if err := n.client.SendMessage("newt/socket/containers", map[string]interface{}{
-			"containers": containers,
-		}); err != nil {
-			logger.Error("Failed to send Docker container list: %v", err)
-		} else {
-			logger.Debug("Docker container list sent, count: %d", len(containers))
-		}
 	})
 
 	n.client.RegisterHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {

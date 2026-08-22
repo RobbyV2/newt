@@ -70,9 +70,6 @@ type fileSettings struct {
 	BlueprintFile             *string `json:"blueprintFile"`
 	ProvisioningBlueprintFile *string `json:"provisioningBlueprintFile"`
 
-	DockerSocket                   *string `json:"dockerSocket"`
-	DockerEnforceNetworkValidation *bool   `json:"dockerEnforceNetworkValidation"`
-
 	AuthDaemonKey                    *string `json:"adPreSharedKey"`
 	AuthDaemonPrincipalsFile         *string `json:"adPrincipalsFile"`
 	AuthDaemonCACertPath             *string `json:"adCaCertPath"`
@@ -82,13 +79,6 @@ type fileSettings struct {
 	TLSClientKey  *string  `json:"tlsClientKey"`
 	TLSClientCAs  []string `json:"tlsClientCa"`
 	TLSPrivateKey *string  `json:"tlsClientCert"` // legacy PKCS12 path; matches the key already written by the credential-save path
-
-	MetricsEnabled    *bool   `json:"metrics"`
-	OTLPEnabled       *bool   `json:"otlp"`
-	AdminAddr         *string `json:"metricsAdminAddr"`
-	Region            *string `json:"region"`
-	MetricsAsyncBytes *bool   `json:"metricsAsyncBytes"`
-	PprofEnabled      *bool   `json:"pprof"`
 }
 
 // resolveConfigFilePath determines the settings/credentials file path using
@@ -258,7 +248,6 @@ func loadNewtConfig() newtpkg.Config {
 		NativeMainInterfaceName:  "newt",
 		AuthDaemonPrincipalsFile: "/var/run/auth-daemon/principals",
 		AuthDaemonCACertPath:     "/etc/ssh/ca.pem",
-		AdminAddr:                "127.0.0.1:2112",
 	}
 
 	mtuStr := "1280"
@@ -266,7 +255,6 @@ func loadNewtConfig() newtpkg.Config {
 	pingIntervalStr := "15s"
 	pingTimeoutStr := "7s"
 	udpProxyIdleTimeoutStr := "90s"
-	dockerEnforceStr := "false"
 
 	// ---- layer 1: config file ----
 	if fileCfg != nil {
@@ -306,12 +294,6 @@ func loadNewtConfig() newtpkg.Config {
 		applyStr(&cfg.BlueprintFile, fileCfg.BlueprintFile, "blueprint-file", sources, sourceFile)
 		applyStr(&cfg.ProvisioningBlueprintFile, fileCfg.ProvisioningBlueprintFile, "provisioning-blueprint-file", sources, sourceFile)
 
-		applyStr(&cfg.DockerSocket, fileCfg.DockerSocket, "docker-socket", sources, sourceFile)
-		if fileCfg.DockerEnforceNetworkValidation != nil {
-			dockerEnforceStr = strconv.FormatBool(*fileCfg.DockerEnforceNetworkValidation)
-			sources["docker-enforce-network-validation"] = string(sourceFile)
-		}
-
 		applyStr(&cfg.AuthDaemonKey, fileCfg.AuthDaemonKey, "ad-pre-shared-key", sources, sourceFile)
 		applyStr(&cfg.AuthDaemonPrincipalsFile, fileCfg.AuthDaemonPrincipalsFile, "ad-principals-file", sources, sourceFile)
 		applyStr(&cfg.AuthDaemonCACertPath, fileCfg.AuthDaemonCACertPath, "ad-ca-cert-path", sources, sourceFile)
@@ -324,13 +306,6 @@ func loadNewtConfig() newtpkg.Config {
 			sources["tls-client-ca"] = string(sourceFile)
 		}
 		applyStr(&cfg.TLSPrivateKey, fileCfg.TLSPrivateKey, "tls-client-cert", sources, sourceFile)
-
-		applyBool(&cfg.MetricsEnabled, fileCfg.MetricsEnabled, "metrics", sources, sourceFile)
-		applyBool(&cfg.OTLPEnabled, fileCfg.OTLPEnabled, "otlp", sources, sourceFile)
-		applyStr(&cfg.AdminAddr, fileCfg.AdminAddr, "metrics-admin-addr", sources, sourceFile)
-		applyStr(&cfg.Region, fileCfg.Region, "region", sources, sourceFile)
-		applyBool(&cfg.MetricsAsyncBytes, fileCfg.MetricsAsyncBytes, "metrics-async-bytes", sources, sourceFile)
-		applyBool(&cfg.PprofEnabled, fileCfg.PprofEnabled, "pprof", sources, sourceFile)
 	}
 
 	// ---- layer 2: environment variables ----
@@ -363,9 +338,6 @@ func loadNewtConfig() newtpkg.Config {
 	applyEnvStr(&cfg.BlueprintFile, "BLUEPRINT_FILE", "blueprint-file", sources)
 	applyEnvStr(&cfg.ProvisioningBlueprintFile, "PROVISIONING_BLUEPRINT_FILE", "provisioning-blueprint-file", sources)
 
-	applyEnvStr(&cfg.DockerSocket, "DOCKER_SOCKET", "docker-socket", sources)
-	applyEnvStr(&dockerEnforceStr, "DOCKER_ENFORCE_NETWORK_VALIDATION", "docker-enforce-network-validation", sources)
-
 	applyEnvStr(&cfg.AuthDaemonKey, "AD_KEY", "ad-pre-shared-key", sources)
 	applyEnvStr(&cfg.AuthDaemonPrincipalsFile, "AD_PRINCIPALS_FILE", "ad-principals-file", sources)
 	applyEnvStr(&cfg.AuthDaemonCACertPath, "AD_CA_CERT_PATH", "ad-ca-cert-path", sources)
@@ -391,33 +363,17 @@ func loadNewtConfig() newtpkg.Config {
 		sources["tls-client-cert"] = sources["tls-client-cert-file"]
 	}
 
-	if metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED"); metricsEnabledEnv != "" {
-		if v, err := strconv.ParseBool(metricsEnabledEnv); err == nil {
-			cfg.MetricsEnabled = v
-		} else {
-			cfg.MetricsEnabled = true
-		}
-		sources["metrics"] = string(sourceEnv)
-	}
-	applyEnvBool(&cfg.OTLPEnabled, "NEWT_METRICS_OTLP_ENABLED", "otlp", sources)
-	applyEnvStr(&cfg.AdminAddr, "NEWT_ADMIN_ADDR", "metrics-admin-addr", sources)
-	applyEnvStr(&cfg.Region, "NEWT_REGION", "region", sources)
-	applyEnvBool(&cfg.MetricsAsyncBytes, "NEWT_METRICS_ASYNC_BYTES", "metrics-async-bytes", sources)
-	applyEnvBool(&cfg.PprofEnabled, "NEWT_PPROF_ENABLED", "pprof", sources)
-
 	// ---- layer 3: CLI flags (always registered; default = file/env-resolved value) ----
 	origEndpoint, origID, origSecret := cfg.Endpoint, cfg.ID, cfg.Secret
 	origMTU, origDNS, origLogLevel := mtuStr, cfg.DNS, cfg.LogLevel
 	origUpdown, origInterface, origPort := cfg.UpdownScript, cfg.InterfaceName, portStr
 	origNative, origNativeMain, origInterfaceMain := cfg.UseNativeInterface, cfg.UseNativeMainInterface, cfg.NativeMainInterfaceName
 	origDisableClients, origDisableSSH, origEnforceHC := cfg.DisableClients, cfg.DisableSSH, cfg.EnforceHealthcheckCert
-	origDockerSocket, origPingInterval, origPingTimeout := cfg.DockerSocket, pingIntervalStr, pingTimeoutStr
+	origPingInterval, origPingTimeout := pingIntervalStr, pingTimeoutStr
 	origUDPIdle, origProvisioningKey, origName := udpProxyIdleTimeoutStr, cfg.ProvisioningKey, cfg.NewtName
-	origTLSCert, origTLSKey, origDockerEnforce := cfg.TLSClientCert, cfg.TLSClientKey, dockerEnforceStr
+	origTLSCert, origTLSKey := cfg.TLSClientCert, cfg.TLSClientKey
 	origHealthFile, origBlueprintFile, origProvBlueprintFile := cfg.HealthFile, cfg.BlueprintFile, cfg.ProvisioningBlueprintFile
 	origNoCloud, origTLSPrivateKey := cfg.NoCloud, cfg.TLSPrivateKey
-	origMetrics, origOTLP, origAdminAddr := cfg.MetricsEnabled, cfg.OTLPEnabled, cfg.AdminAddr
-	origMetricsAsync, origPprof, origRegion := cfg.MetricsAsyncBytes, cfg.PprofEnabled, cfg.Region
 	origADKey, origADPrincipals, origADCACert := cfg.AuthDaemonKey, cfg.AuthDaemonPrincipalsFile, cfg.AuthDaemonCACertPath
 	origADRandomPass := cfg.AuthDaemonGenerateRandomPassword
 
@@ -437,7 +393,6 @@ func loadNewtConfig() newtpkg.Config {
 	flag.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
 	flag.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
 	flag.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
-	flag.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
 	flag.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
 	flag.StringVar(&pingTimeoutStr, "ping-timeout", pingTimeoutStr, "Timeout for each ping (default 7s)")
 	flag.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
@@ -454,17 +409,10 @@ func loadNewtConfig() newtpkg.Config {
 	flag.Var(&tlsClientCAsFlag, "tls-client-ca", "Path to CA certificate file for validating remote certificates (can be specified multiple times)")
 
 	flag.StringVar(&cfg.TLSPrivateKey, "tls-client-cert", cfg.TLSPrivateKey, "Path to client certificate (PKCS12 format) - DEPRECATED: use --tls-client-cert-file and --tls-client-key instead")
-	flag.StringVar(&dockerEnforceStr, "docker-enforce-network-validation", dockerEnforceStr, "Enforce validation of container on newt network (true or false)")
 	flag.StringVar(&cfg.HealthFile, "health-file", cfg.HealthFile, "Path to health file (if unset, health file won't be written)")
 	flag.StringVar(&cfg.BlueprintFile, "blueprint-file", cfg.BlueprintFile, "Path to blueprint file (if unset, no blueprint will be applied)")
 	flag.StringVar(&cfg.ProvisioningBlueprintFile, "provisioning-blueprint-file", cfg.ProvisioningBlueprintFile, "Path to blueprint file applied once after a provisioning credential exchange (if unset, no provisioning blueprint will be applied)")
 	flag.BoolVar(&cfg.NoCloud, "no-cloud", cfg.NoCloud, "Disable cloud failover")
-	flag.BoolVar(&cfg.MetricsEnabled, "metrics", cfg.MetricsEnabled, "Enable Prometheus metrics exporter")
-	flag.BoolVar(&cfg.OTLPEnabled, "otlp", cfg.OTLPEnabled, "Enable OTLP exporters (metrics/traces) to OTEL_EXPORTER_OTLP_ENDPOINT")
-	flag.StringVar(&cfg.AdminAddr, "metrics-admin-addr", cfg.AdminAddr, "Admin/metrics bind address")
-	flag.BoolVar(&cfg.MetricsAsyncBytes, "metrics-async-bytes", cfg.MetricsAsyncBytes, "Enable async bytes counting (background flush; lower hot path overhead)")
-	flag.BoolVar(&cfg.PprofEnabled, "pprof", cfg.PprofEnabled, "Enable pprof debug endpoints on admin server")
-	flag.StringVar(&cfg.Region, "region", cfg.Region, "Optional region resource attribute (also NEWT_REGION)")
 	flag.StringVar(&cfg.AuthDaemonKey, "ad-pre-shared-key", cfg.AuthDaemonKey, "Pre-shared key for auth daemon authentication")
 	flag.StringVar(&cfg.AuthDaemonPrincipalsFile, "ad-principals-file", cfg.AuthDaemonPrincipalsFile, "Path to the principals file for auth daemon")
 	flag.StringVar(&cfg.AuthDaemonCACertPath, "ad-ca-cert-path", cfg.AuthDaemonCACertPath, "Path to the CA certificate file for auth daemon")
@@ -503,7 +451,6 @@ func loadNewtConfig() newtpkg.Config {
 	markCLI("disable-clients", cfg.DisableClients != origDisableClients)
 	markCLI("disable-ssh", cfg.DisableSSH != origDisableSSH)
 	markCLI("enforce-hc-cert", cfg.EnforceHealthcheckCert != origEnforceHC)
-	markCLI("docker-socket", cfg.DockerSocket != origDockerSocket)
 	markCLI("ping-interval", pingIntervalStr != origPingInterval)
 	markCLI("ping-timeout", pingTimeoutStr != origPingTimeout)
 	markCLI("udp-proxy-idle-timeout", udpProxyIdleTimeoutStr != origUDPIdle)
@@ -512,17 +459,10 @@ func loadNewtConfig() newtpkg.Config {
 	markCLI("tls-client-cert-file", cfg.TLSClientCert != origTLSCert)
 	markCLI("tls-client-key", cfg.TLSClientKey != origTLSKey)
 	markCLI("tls-client-cert", cfg.TLSPrivateKey != origTLSPrivateKey)
-	markCLI("docker-enforce-network-validation", dockerEnforceStr != origDockerEnforce)
 	markCLI("health-file", cfg.HealthFile != origHealthFile)
 	markCLI("blueprint-file", cfg.BlueprintFile != origBlueprintFile)
 	markCLI("provisioning-blueprint-file", cfg.ProvisioningBlueprintFile != origProvBlueprintFile)
 	markCLI("no-cloud", cfg.NoCloud != origNoCloud)
-	markCLI("metrics", cfg.MetricsEnabled != origMetrics)
-	markCLI("otlp", cfg.OTLPEnabled != origOTLP)
-	markCLI("metrics-admin-addr", cfg.AdminAddr != origAdminAddr)
-	markCLI("metrics-async-bytes", cfg.MetricsAsyncBytes != origMetricsAsync)
-	markCLI("pprof", cfg.PprofEnabled != origPprof)
-	markCLI("region", cfg.Region != origRegion)
 	markCLI("ad-pre-shared-key", cfg.AuthDaemonKey != origADKey)
 	markCLI("ad-principals-file", cfg.AuthDaemonPrincipalsFile != origADPrincipals)
 	markCLI("ad-ca-cert-path", cfg.AuthDaemonCACertPath != origADCACert)
@@ -538,7 +478,7 @@ func loadNewtConfig() newtpkg.Config {
 	}
 
 	if *showConfig {
-		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr)
+		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr)
 		os.Exit(0)
 	}
 
@@ -564,14 +504,6 @@ func loadNewtConfig() newtpkg.Config {
 	}
 	cfg.MTU = mtuInt
 
-	// Parse docker network validation flag
-	if v, err := strconv.ParseBool(dockerEnforceStr); err == nil {
-		cfg.DockerEnforceNetworkValidation = v
-	} else {
-		logger.Info("Docker enforce network validation cannot be parsed. Defaulting to 'false'")
-		cfg.DockerEnforceNetworkValidation = false
-	}
-
 	// Parse durations (after flag.Parse so CLI flags take effect)
 	cfg.PingInterval = parseDurationEnvOrFlag(pingIntervalStr, 15*time.Second, "PING_INTERVAL")
 	cfg.PingTimeout = parseDurationEnvOrFlag(pingTimeoutStr, 7*time.Second, "PING_TIMEOUT")
@@ -581,7 +513,7 @@ func loadNewtConfig() newtpkg.Config {
 }
 
 // printShowConfig prints the resolved configuration and the source of each value
-func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr string) {
+func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr string) {
 	getSource := func(key string) string {
 		if s, ok := sources[key]; ok && s != "" {
 			return s
@@ -647,10 +579,6 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  provisioning-blueprint-file = %s [%s]\n", mask("provisioning-blueprint-file", cfg.ProvisioningBlueprintFile), getSource("provisioning-blueprint-file"))
 	fmt.Printf("  updown                      = %s [%s]\n", mask("updown", cfg.UpdownScript), getSource("updown"))
 
-	fmt.Println("\nDocker:")
-	fmt.Printf("  docker-socket                     = %s [%s]\n", mask("docker-socket", cfg.DockerSocket), getSource("docker-socket"))
-	fmt.Printf("  docker-enforce-network-validation = %s [%s]\n", dockerEnforceStr, getSource("docker-enforce-network-validation"))
-
 	fmt.Println("\nAuth Daemon:")
 	fmt.Printf("  ad-pre-shared-key           = %s [%s]\n", mask("ad-pre-shared-key", cfg.AuthDaemonKey), getSource("ad-pre-shared-key"))
 	fmt.Printf("  ad-principals-file          = %s [%s]\n", cfg.AuthDaemonPrincipalsFile, getSource("ad-principals-file"))
@@ -662,14 +590,6 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  tls-client-key       = %s [%s]\n", mask("tls-client-key", cfg.TLSClientKey), getSource("tls-client-key"))
 	fmt.Printf("  tls-client-ca        = %v [%s]\n", cfg.TLSClientCAs, getSource("tls-client-ca"))
 	fmt.Printf("  tls-client-cert      = %s [%s] (deprecated PKCS12 path)\n", mask("tls-client-cert", cfg.TLSPrivateKey), getSource("tls-client-cert"))
-
-	fmt.Println("\nMetrics/Observability:")
-	fmt.Printf("  metrics             = %v [%s]\n", cfg.MetricsEnabled, getSource("metrics"))
-	fmt.Printf("  otlp                = %v [%s]\n", cfg.OTLPEnabled, getSource("otlp"))
-	fmt.Printf("  metrics-admin-addr  = %s [%s]\n", cfg.AdminAddr, getSource("metrics-admin-addr"))
-	fmt.Printf("  metrics-async-bytes = %v [%s]\n", cfg.MetricsAsyncBytes, getSource("metrics-async-bytes"))
-	fmt.Printf("  pprof               = %v [%s]\n", cfg.PprofEnabled, getSource("pprof"))
-	fmt.Printf("  region              = %s [%s]\n", cfg.Region, getSource("region"))
 
 	fmt.Println("\n--- Source Legend ---")
 	fmt.Println("  default     = Built-in default value")

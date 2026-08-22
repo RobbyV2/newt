@@ -1,7 +1,6 @@
 package clients
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -30,8 +29,6 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
-	"github.com/fosrl/newt/internal/telemetry"
 )
 
 type WgConfig struct {
@@ -230,14 +227,6 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 // (i.e. before the first newt/wg/receive-config message is processed).
 func (s *WireGuardService) SetCredentialStore(store *nativessh.CredentialStore) {
 	s.credStore = store
-}
-
-// ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
-func (s *WireGuardService) ReportRTT(seconds float64) {
-	if s.serverPubKey == "" {
-		return
-	}
-	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
 }
 
 func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {

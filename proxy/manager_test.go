@@ -1,14 +1,12 @@
 package proxy
 
 import (
-	"context"
 	"net/netip"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
@@ -18,10 +16,6 @@ import (
 // stop retrying, instead of spinning forever logging
 // "Error accepting TCP connection: ... endpoint is in invalid state".
 func TestRemoveTargetStopsAcceptLoop(t *testing.T) {
-	if _, err := telemetry.Init(context.Background(), telemetry.Config{ServiceName: "test"}); err != nil {
-		t.Fatalf("telemetry.Init: %v", err)
-	}
-
 	logFile, err := os.CreateTemp(t.TempDir(), "newt-proxy-test-*.log")
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)

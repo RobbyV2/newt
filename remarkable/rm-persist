@@ -30,7 +30,9 @@
 #   rm-persist remove NAME.service
 #   rm-persist uninstall          remove all staged copies and the hooks
 #
-# Units directory: /home/root/units (override with RM_PERSIST_UNITS).
+# Units directory: /home/root/units (override with RM_PERSIST_UNITS). Service
+# and socket units are staged; a template like name@.service is copied and not
+# enabled, its socket enables it.
 set -u
 
 UNITS=${RM_PERSIST_UNITS:-/home/root/units}
@@ -94,6 +96,18 @@ wanted_by() {
 	sed -n 's/^WantedBy=\([^ ]*\).*/\1/p' "$1" | head -n 1
 }
 
+# every unit file we manage
+units() {
+	for u in "$UNITS"/*.service "$UNITS"/*.socket; do
+		[ -f "$u" ] && echo "$u"
+	done
+}
+
+# templates (name@.service) are instantiated by their socket, not enabled
+is_template() {
+	case "$(basename "$1")" in *@.*) return 0 ;; *) return 1 ;; esac
+}
+
 # stage ETC ROOT: copy every unit under $UNITS into ETC/systemd/system, add the
 # wants symlink, and drop the swupdate hook when ROOT carries an swupdate that
 # sources conf.d.
@@ -101,12 +115,12 @@ stage() {
 	etc=$1
 	root=$2
 	[ -d "$etc/systemd/system" ] || return 1
-	for u in "$UNITS"/*.service; do
-		[ -f "$u" ] || continue
+	for u in $(units); do
 		n=$(basename "$u")
-		t=$(wanted_by "$u")
-		t=${t:-multi-user.target}
 		cp "$u" "$etc/systemd/system/$n"
+		is_template "$u" && continue
+		t=$(wanted_by "$u")
+		case "$n" in *.socket) t=${t:-sockets.target} ;; *) t=${t:-multi-user.target} ;; esac
 		mkdir -p "$etc/systemd/system/$t.wants"
 		ln -sf "/etc/systemd/system/$n" "$etc/systemd/system/$t.wants/$n"
 	done
@@ -123,8 +137,7 @@ HOOKEOF
 
 unstage() {
 	etc=$1
-	for u in "$UNITS"/*.service; do
-		[ -f "$u" ] || continue
+	for u in $(units); do
 		n=$(basename "$u")
 		rm -f "$etc/systemd/system/$n" "$etc/systemd/system"/*.wants/"$n"
 	done
@@ -237,8 +250,8 @@ cmd_install() {
 	with_current_root stage
 	with_other_root stage || true
 	reload_swupdate
-	for u in "$UNITS"/*.service; do
-		[ -f "$u" ] || continue
+	for u in $(units); do
+		is_template "$u" && continue
 		systemctl enable -q "$(basename "$u")" 2>/dev/null || true
 	done
 	# release the lock first: the unit's ExecStart takes it too
@@ -274,8 +287,7 @@ cmd_status() {
 	echo "units:          $(ls "$UNITS" 2>/dev/null | tr '\n' ' ')"
 	if hook_live; then echo "swupdate hook:  live"; else echo "swupdate hook:  not in the running swupdate"; fi
 	check() {
-		for u in "$UNITS"/*.service; do
-			[ -f "$u" ] || continue
+		for u in $(units); do
 			n=$(basename "$u")
 			if cmp -s "$u" "$1/systemd/system/$n"; then s=ok; else s=MISSING; fi
 			echo "  $n $s"
@@ -296,8 +308,8 @@ cmd_status() {
 		check "$RUN/other/etc"
 		umount "$RUN/other"
 	fi
-	for u in "$UNITS"/*.service; do
-		[ -f "$u" ] || continue
+	for u in $(units); do
+		is_template "$u" && continue
 		n=$(basename "$u")
 		echo "$n: $(systemctl is-active "$n" 2>/dev/null) / $(systemctl is-enabled "$n" 2>/dev/null)"
 	done
@@ -318,8 +330,8 @@ cmd_remove() {
 }
 
 cmd_uninstall() {
-	for u in "$UNITS"/*.service; do
-		[ -f "$u" ] || continue
+	for u in $(units); do
+		is_template "$u" && continue
 		systemctl disable -q --now "$(basename "$u")" 2>/dev/null || true
 	done
 	lock

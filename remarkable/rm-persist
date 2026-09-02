@@ -1,0 +1,352 @@
+#!/bin/sh
+# rm-persist: keep third-party systemd units alive across reboots and firmware
+# updates on reMarkable tablets (reMarkable 1, reMarkable 2, Paper Pro).
+#
+# The firmware keeps two root partitions and flashes the inactive one on every
+# update, so anything written to the running rootfs is gone after the next
+# update. /home survives. This tool keeps the unit files under /home/root/units
+# and stages copies into every place systemd will look:
+#
+#   the live /etc                 effective now, without a reboot
+#   the running root partition    effective on the next boot
+#   the other root partition      effective after the next firmware update
+#
+# On the Paper Pro /etc is a boot-wiped tmpfs overlay over a read-only rootfs;
+# the rootfs copy is reached through a non-recursive bind mount of /. On the
+# reMarkable 1 and 2 the rootfs is writable and the same bind mount lands on
+# the real /etc, so one code path serves every device.
+#
+# Two hooks re-run the staging without anyone touching the device:
+#
+#   swupdate -p         the updater runs `rm-persist postupdate` on the old
+#                       system right after it has flashed the new partition
+#   rm-persist.service  ExecStart at boot and ExecStop at shutdown both
+#                       re-stage into the other partition
+#
+# Commands:
+#   rm-persist install            stage everything, enable the hooks
+#   rm-persist sync               re-stage into both partitions
+#   rm-persist status             where the units are and whether the hook is live
+#   rm-persist remove NAME.service
+#   rm-persist uninstall          remove all staged copies and the hooks
+#
+# Units directory: /home/root/units (override with RM_PERSIST_UNITS).
+set -u
+
+UNITS=${RM_PERSIST_UNITS:-/home/root/units}
+SELF=/home/root/.local/bin/rm-persist
+HOOK=50-rm-persist
+RUN=/run/rm-persist
+SWU_STATUS=/sys/devices/platform/lpgpr/swu_status
+
+log() {
+	echo "rm-persist: $*" >&2
+	logger -t rm-persist -- "$*" 2>/dev/null || true
+}
+
+die() {
+	log "$*"
+	exit 1
+}
+
+# --- device geometry ---------------------------------------------------------
+
+# Block device mounted on /.
+root_dev() {
+	d=$(awk '$2 == "/" { print $1 }' /proc/mounts | tail -n 1)
+	case "$d" in
+	/dev/root | "")
+		d=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
+		;;
+	esac
+	realpath "$d" 2>/dev/null || echo "$d"
+}
+
+# The other root partition. Paper Pro labels them root_a and root_b; the older
+# devices keep them at p2 and p3 of the same eMMC.
+other_dev() {
+	cur=$(root_dev)
+	if [ -e /dev/disk/by-partlabel/root_a ] && [ -e /dev/disk/by-partlabel/root_b ]; then
+		a=$(realpath /dev/disk/by-partlabel/root_a)
+		b=$(realpath /dev/disk/by-partlabel/root_b)
+		if [ "$cur" = "$a" ]; then echo "$b"; else echo "$a"; fi
+		return
+	fi
+	case "$cur" in
+	*p2) echo "${cur%p2}p3" ;;
+	*p3) echo "${cur%p3}p2" ;;
+	*) return 1 ;;
+	esac
+}
+
+root_is_ro() {
+	awk '$2 == "/" { print $4 }' /proc/mounts | tail -n 1 | tr ',' '\n' | grep -qx ro
+}
+
+# 7 means swupdate is writing the other partition right now.
+update_in_progress() {
+	[ -r "$SWU_STATUS" ] && [ "$(cat "$SWU_STATUS")" = 7 ]
+}
+
+# --- staging -----------------------------------------------------------------
+
+wanted_by() {
+	sed -n 's/^WantedBy=\([^ ]*\).*/\1/p' "$1" | head -n 1
+}
+
+# stage ETC ROOT: copy every unit under $UNITS into ETC/systemd/system, add the
+# wants symlink, and drop the swupdate hook when ROOT carries an swupdate that
+# sources conf.d.
+stage() {
+	etc=$1
+	root=$2
+	[ -d "$etc/systemd/system" ] || return 1
+	for u in "$UNITS"/*.service; do
+		[ -f "$u" ] || continue
+		n=$(basename "$u")
+		t=$(wanted_by "$u")
+		t=${t:-multi-user.target}
+		cp "$u" "$etc/systemd/system/$n"
+		mkdir -p "$etc/systemd/system/$t.wants"
+		ln -sf "/etc/systemd/system/$n" "$etc/systemd/system/$t.wants/$n"
+	done
+	if [ -f "$root/usr/lib/swupdate/swupdate.sh" ]; then
+		mkdir -p "$etc/swupdate/conf.d"
+		cat > "$etc/swupdate/conf.d/$HOOK" <<HOOKEOF
+# Installed by rm-persist. swupdate runs this once the new root partition is
+# flashed, so the units under /home/root/units are staged into it before the
+# reboot into the new firmware.
+SWUPDATE_ARGS="\$SWUPDATE_ARGS -p $SELF-postupdate"
+HOOKEOF
+	fi
+}
+
+unstage() {
+	etc=$1
+	for u in "$UNITS"/*.service; do
+		[ -f "$u" ] || continue
+		n=$(basename "$u")
+		rm -f "$etc/systemd/system/$n" "$etc/systemd/system"/*.wants/"$n"
+	done
+	rm -f "$etc/swupdate/conf.d/$HOOK"
+}
+
+# Run ACTION against the rootfs behind the running /, remounting as needed.
+with_current_root() {
+	action=$1
+	ro=0
+	root_is_ro && ro=1
+	mkdir -p "$RUN/root"
+	[ "$ro" = 1 ] && mount -o remount,rw / || true
+	mountpoint -q "$RUN/root" || mount --bind / "$RUN/root" || die "cannot bind mount /"
+	mount -o remount,rw,bind "$RUN/root" 2>/dev/null || true
+	$action "$RUN/root/etc" "$RUN/root"
+	rc=$?
+	sync
+	umount "$RUN/root"
+	[ "$ro" = 1 ] && mount -o remount,ro / || true
+	return $rc
+}
+
+# Run ACTION against the other root partition, if it holds a rootfs.
+with_other_root() {
+	action=$1
+	dev=$(other_dev) || { log "no other root partition found"; return 1; }
+	if update_in_progress; then
+		log "update in progress on $dev, leaving it alone"
+		return 1
+	fi
+	mkdir -p "$RUN/other"
+	if ! mount -t ext4 -o rw "$dev" "$RUN/other" 2>/dev/null; then
+		log "$dev does not mount as ext4, skipping"
+		return 1
+	fi
+	if [ -d "$RUN/other/etc/systemd/system" ] && [ -d "$RUN/other/usr/lib/systemd" ]; then
+		$action "$RUN/other/etc" "$RUN/other"
+		rc=$?
+		v=$(cat "$RUN/other/etc/version" 2>/dev/null || echo unknown)
+		log "staged into $dev (firmware $v)"
+	else
+		log "$dev holds no rootfs, skipping"
+		rc=1
+	fi
+	sync
+	umount "$RUN/other"
+	return $rc
+}
+
+# The hook is only picked up when swupdate starts. Restart it while idle.
+reload_swupdate() {
+	systemctl daemon-reload
+	if systemctl -q is-active swupdate.service 2>/dev/null; then
+		if update_in_progress; then
+			log "swupdate busy, hook takes effect at next boot"
+		else
+			systemctl try-restart swupdate.service
+		fi
+	fi
+}
+
+hook_live() {
+	for p in $(pidof swupdate 2>/dev/null); do
+		tr '\0' ' ' < "/proc/$p/cmdline" | grep -q -- "$SELF-postupdate" && return 0
+	done
+	return 1
+}
+
+write_own_unit() {
+	mkdir -p "$UNITS"
+	cat > "$UNITS/rm-persist.service" <<UNITEOF
+[Unit]
+Description=Stage third-party systemd units into both root partitions
+RequiresMountsFor=/home/root
+After=home.mount
+Before=swupdate.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$SELF boot
+ExecStop=$SELF shutdown
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+}
+
+lock() {
+	if command -v flock >/dev/null 2>&1; then
+		mkdir -p "$RUN"
+		exec 9> "$RUN/lock"
+		flock 9 || die "cannot take the lock"
+	fi
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_install() {
+	[ "$(realpath "$0")" = "$SELF" ] || {
+		mkdir -p "$(dirname "$SELF")"
+		cp "$0" "$SELF"
+		chmod 755 "$SELF"
+	}
+	ln -sf rm-persist "$SELF-postupdate"
+	write_own_unit
+	lock
+	stage /etc /
+	with_current_root stage
+	with_other_root stage || true
+	reload_swupdate
+	for u in "$UNITS"/*.service; do
+		[ -f "$u" ] || continue
+		systemctl enable -q "$(basename "$u")" 2>/dev/null || true
+	done
+	# release the lock first: the unit's ExecStart takes it too
+	exec 9>&-
+	systemctl start rm-persist.service 2>/dev/null || true
+	log "installed: $(ls "$UNITS" | tr '\n' ' ')"
+}
+
+cmd_sync() {
+	lock
+	stage /etc /
+	with_current_root stage
+	with_other_root stage || true
+	systemctl daemon-reload
+}
+
+cmd_postupdate() {
+	lock
+	log "swupdate reports a finished install, staging into the new partition"
+	with_other_root stage
+}
+
+cmd_shutdown() {
+	lock
+	with_other_root stage || true
+}
+
+cmd_status() {
+	cur=$(root_dev)
+	oth=$(other_dev 2>/dev/null || echo none)
+	echo "running root:   $cur ($(cat /etc/version 2>/dev/null || echo ?))"
+	echo "other root:     $oth"
+	echo "units:          $(ls "$UNITS" 2>/dev/null | tr '\n' ' ')"
+	if hook_live; then echo "swupdate hook:  live"; else echo "swupdate hook:  not in the running swupdate"; fi
+	check() {
+		for u in "$UNITS"/*.service; do
+			[ -f "$u" ] || continue
+			n=$(basename "$u")
+			if cmp -s "$u" "$1/systemd/system/$n"; then s=ok; else s=MISSING; fi
+			echo "  $n $s"
+		done
+		[ -f "$1/swupdate/conf.d/$HOOK" ] && echo "  $HOOK ok" || echo "  $HOOK MISSING"
+	}
+	echo "live /etc:"
+	check /etc
+	mkdir -p "$RUN/root"
+	if mount --bind / "$RUN/root" 2>/dev/null; then
+		echo "running rootfs:"
+		check "$RUN/root/etc"
+		umount "$RUN/root"
+	fi
+	mkdir -p "$RUN/other"
+	if [ "$oth" != none ] && mount -t ext4 -o ro "$oth" "$RUN/other" 2>/dev/null; then
+		echo "other rootfs ($(cat "$RUN/other/etc/version" 2>/dev/null || echo ?)):"
+		check "$RUN/other/etc"
+		umount "$RUN/other"
+	fi
+	for u in "$UNITS"/*.service; do
+		[ -f "$u" ] || continue
+		n=$(basename "$u")
+		echo "$n: $(systemctl is-active "$n" 2>/dev/null) / $(systemctl is-enabled "$n" 2>/dev/null)"
+	done
+}
+
+cmd_remove() {
+	n=$1
+	[ -f "$UNITS/$n" ] || die "$UNITS/$n not found"
+	systemctl disable -q --now "$n" 2>/dev/null || true
+	lock
+	rm_one() { rm -f "$1/systemd/system/$n" "$1/systemd/system"/*.wants/"$n"; }
+	rm_one /etc
+	with_current_root rm_one
+	with_other_root rm_one || true
+	rm -f "$UNITS/$n"
+	systemctl daemon-reload
+	log "removed $n"
+}
+
+cmd_uninstall() {
+	for u in "$UNITS"/*.service; do
+		[ -f "$u" ] || continue
+		systemctl disable -q --now "$(basename "$u")" 2>/dev/null || true
+	done
+	lock
+	unstage /etc
+	with_current_root unstage
+	with_other_root unstage || true
+	reload_swupdate
+	log "unstaged everything; unit files remain in $UNITS"
+}
+
+case "$(basename "$0")" in
+rm-persist-postupdate)
+	cmd_postupdate
+	exit
+	;;
+esac
+
+case "${1:-}" in
+install) cmd_install ;;
+sync | boot) cmd_sync ;;
+postupdate) cmd_postupdate ;;
+shutdown) cmd_shutdown ;;
+status) cmd_status ;;
+remove) cmd_remove "${2:?unit name}" ;;
+uninstall) cmd_uninstall ;;
+*)
+	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+	exit 1
+	;;
+esac

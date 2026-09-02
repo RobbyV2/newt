@@ -1,0 +1,18 @@
+[Unit]
+Description=Newt tunnel client for Pangolin
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/home/root
+
+[Service]
+WorkingDirectory=/home/root/newt
+ExecStart=/home/root/newt/newt --config-file /home/root/newt/config.json
+Environment=HOME=/home/root
+# Newt replaces its own binary from the Pangolin server every six hours unless
+# it believes it runs in a container. Drop this line to let it self-update.
+Environment=NEWT_SYSTEM_SUBSTRATE=CONTAINER
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
